@@ -5,3 +5,5 @@ pub mod data;
 pub mod desktop;
 pub mod detect;
 pub mod format;
+pub mod gui;
+pub mod shrink;

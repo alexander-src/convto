@@ -1,20 +1,22 @@
 # convto
 
-Zero-dependency Rust CLI and Linux file-manager context menu ("Convert to") for converting images, GIFs, audio, video, PDFs, structured data, archives, and documents from a right-click or terminal.
+Zero-dependency Rust CLI and Linux file-manager context menu ("Convert to" and "Shrink / Optimize...") for converting and size-optimizing images, GIFs, audio, video, PDFs, structured data, archives, and documents from a right-click or terminal.
 
 ![demo](assets/demo.png)
 
 ## What it does
 
-Right-click one or more files in your Linux file manager, hover **Convert to**, and pick a target format. `convto` writes converted outputs atomically beside the source file without overwriting existing files (`photo.png`, then `photo (1).png`), converts multi-file selections in parallel, and sends a desktop notification via `notify-send`.
+Right-click one or more files in your Linux file manager, hover **Convert to**, and either pick a target format or click **Shrink / Optimize...** to reduce file size while keeping the highest quality that fits your budget. `convto` writes outputs atomically beside the source file without overwriting originals (`photo.png`, then `photo (1).png`; `clip-shrunk.mp4` for shrinking), converts multi-file selections in parallel, and sends a desktop notification via `notify-send`.
 
 Key details:
-- Single ~600 KB stripped binary (`#![forbid(unsafe_code)]`, zero external crates).
+- Single ~685 KB stripped binary (`#![forbid(unsafe_code)]`, zero external crates).
+- Interactive Shrink & Optimize dialog (native GTK4 / Libadwaita with `kdialog`/`zenity` fallback) with three modes: exact Target Size (`10 MB`, `500 KB`, Discord/Email presets), Size % Wheel (slider + scroll-wheel spinbox targeting a percentage of original bytes), and Quality Wheel (`10%` to `100%` + lossless-only toggle), plus a collapsible Advanced drawer.
+- Binary-search image quality solver (JPEG, WebP, AVIF, JXL, plus lossless and quantized PNG) that finds the highest quality fitting under your byte limit, with automatic gentle scaling only if needed.
+- Two-pass exact-bitrate video and audio shrinking via `ffprobe` + `ffmpeg` (H.264, H.265/HEVC, VP9 WebM, Opus, MP3, M4A) and tiered-DPI Ghostscript PDF shrinking that preserves vector text.
 - Magic-byte sniffing catches misnamed files (for example, WebP bytes saved with a `.jpg` extension still convert properly instead of skipping as already JPEG).
 - Disjoint MIME menus so Dolphin shows one **Convert to** submenu per file type, only installing groups whose backends exist on your machine.
 - Built-in structured data converter (`json`, `yaml`, `toml`, `csv`, `tsv`) with no external dependencies.
 - Archive repacking validates member paths against directory traversal (`..` and absolute paths) before extraction.
-- Image conversion flattens transparency onto white for JPEG/BMP, scales down cleanly for multi-size `.ico`, and uses `rsvg-convert` for SVG when available. Video to GIF uses two-pass `palettegen`/`paletteuse`.
 
 ## Supported formats
 
@@ -76,12 +78,21 @@ convto tsv export.csv
 # Repack archives safely
 convto tar.zst backup.zip
 
+# Shrink while preserving maximum quality (exact target size, size %, quality wheel, or GUI)
+convto shrink clip.mp4 --target-size 10MB
+convto shrink photo.png --percent 45 --to webp
+convto shrink report.pdf --target-size 2MB
+convto shrink photo.jpg --lossless
+convto shrink --gui photo.png clip.mp4
+
 # Inspect detected format, valid targets, and installed backends
 convto targets photo.webp
 convto doctor
 ```
 
-Useful flags: `--out-dir <dir>`, `--overwrite`, `--force` (re-encode same format), `--delete-source`, `--quality <1-100>`, `--jobs <n>`, `--dry-run`, `--notify`.
+Useful convert flags: `--out-dir <dir>`, `--overwrite`, `--force` (re-encode same format), `--delete-source`, `--quality <1-100>`, `--jobs <n>`, `--dry-run`, `--notify`.
+
+Useful shrink flags: `--target-size <size>`, `--percent <1-99>`, `--quality <1-100>`, `--lossless`, `--to <fmt>`, `--hevc`, `--max-dim <px>`, `--preset fast|medium|slow`, `--no-two-pass`, `--keep-metadata`, `--in-place`, `--gui`, `--json`.
 
 ## Limitations
 

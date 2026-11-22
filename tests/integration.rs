@@ -7,6 +7,7 @@ use convto::convert::{convert_file, ConvertOptions, Outcome};
 use convto::desktop::{install_menus, uninstall_menus, DesktopTarget};
 use convto::detect::Backends;
 use convto::format::{detect_format, Format};
+use convto::shrink::{shrink_file, ShrinkGoal, ShrinkOptions, ShrinkOutcome};
 
 static TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -436,4 +437,197 @@ fn cli_parallel_batch_and_doctor() {
     assert!(doc.status.success());
     let stdout = String::from_utf8_lossy(&doc.stdout);
     assert!(stdout.contains("[builtin]"));
+    assert!(stdout.contains("shrink-ui"));
+}
+
+#[test]
+fn live_shrink_images_video_audio_and_pdf() {
+    let backends = Backends::probe();
+    let dir = TempWorkDir::new("shrink");
+
+    // 1. High-entropy noisy JPEG (~200+ KB) -> binary search target <= 35 KB!
+    if let Some(magick) = backends.image_tool() {
+        let noisy_jpg = dir.path().join("photo.jpg");
+        let st = Command::new(magick)
+            .args([
+                "-size", "640x480", "xc:gray", "+noise", "Random", "-quality", "98",
+            ])
+            .arg(&noisy_jpg)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let orig_sz = fs::metadata(&noisy_jpg).unwrap().len();
+        assert!(
+            orig_sz > 80_000,
+            "expected noisy JPEG > 80KB, got {orig_sz}"
+        );
+
+        let target = 35_000u64;
+        let opts = ShrinkOptions {
+            goal: ShrinkGoal::TargetBytes(target),
+            ..Default::default()
+        };
+        let ShrinkOutcome::Shrunk {
+            output,
+            original_bytes,
+            final_bytes,
+            ..
+        } = shrink_file(&noisy_jpg, &backends, &opts).unwrap()
+        else {
+            panic!("expected noisy JPEG to shrink");
+        };
+        assert_eq!(original_bytes, orig_sz);
+        assert!(
+            final_bytes <= target,
+            "expected final_bytes ({final_bytes}) <= {target}"
+        );
+        assert_eq!(output.file_name().unwrap(), "photo-shrunk.jpg");
+        assert_eq!(detect_format(&output), Some(Format::Jpg));
+
+        // 2. Percentage mode + convert to WebP via CLI with --json output.
+        let bin = env!("CARGO_BIN_EXE_convto");
+        let cli = Command::new(bin)
+            .args(["shrink", "--percent", "40", "--to", "webp", "--json"])
+            .arg(&noisy_jpg)
+            .output()
+            .unwrap();
+        assert!(
+            cli.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&cli.stderr)
+        );
+        let out_json = String::from_utf8_lossy(&cli.stdout);
+        assert!(out_json.contains("\"status\":\"shrunk\""), "{out_json}");
+        let webp_out = dir.path().join("photo.webp");
+        assert!(webp_out.exists());
+        assert!(fs::metadata(&webp_out).unwrap().len() <= (orig_sz * 40 / 100) + 1024);
+
+        // 3. PNG target-size shrink.
+        let noisy_png = dir.path().join("shot.png");
+        let st = Command::new(magick)
+            .args(["-size", "320x240", "plasma:fractal"])
+            .arg(&noisy_png)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let png_orig = fs::metadata(&noisy_png).unwrap().len();
+        let png_opts = ShrinkOptions {
+            goal: ShrinkGoal::SizePercent(45.0),
+            ..Default::default()
+        };
+        let res = shrink_file(&noisy_png, &backends, &png_opts).unwrap();
+        match res {
+            ShrinkOutcome::Shrunk { final_bytes, .. } => {
+                assert!(final_bytes < png_orig, "{final_bytes} vs {png_orig}");
+            }
+            ShrinkOutcome::AlreadyOptimal { .. } => panic!("expected plasma PNG to shrink"),
+            ShrinkOutcome::DryRun { .. } => unreachable!(),
+        }
+    }
+
+    // 4. Video 2-pass exact target-size shrink + audio target-size shrink.
+    if let (Some(ffmpeg), Some(_)) = (backends.ffmpeg.as_deref(), backends.ffprobe.as_deref()) {
+        let clip = dir.path().join("sample.mp4");
+        let st = Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=24:duration=2.0",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2.0",
+                "-c:v",
+                "libx264",
+                "-crf",
+                "14",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+            ])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let orig_vid = fs::metadata(&clip).unwrap().len();
+        let target_vid = (orig_vid / 2).max(40_000);
+        let opts = ShrinkOptions {
+            goal: ShrinkGoal::TargetBytes(target_vid),
+            two_pass: true,
+            ..Default::default()
+        };
+        let ShrinkOutcome::Shrunk {
+            output,
+            final_bytes,
+            detail,
+            ..
+        } = shrink_file(&clip, &backends, &opts).unwrap()
+        else {
+            panic!("expected video to shrink");
+        };
+        assert!(detail.contains("2-pass"), "{detail}");
+        assert!(final_bytes < orig_vid, "{final_bytes} vs {orig_vid}");
+        assert!(output.exists());
+
+        // Audio shrink (WAV -> MP3 target size).
+        let wav = dir.path().join("voice.wav");
+        let st = Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=2.0",
+            ])
+            .arg(&wav)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let audio_opts = ShrinkOptions {
+            goal: ShrinkGoal::TargetBytes(25_000),
+            target_format: Some(Format::Mp3),
+            ..Default::default()
+        };
+        let ShrinkOutcome::Shrunk {
+            final_bytes: mp3_bytes,
+            ..
+        } = shrink_file(&wav, &backends, &audio_opts).unwrap()
+        else {
+            panic!("expected WAV -> MP3 shrink");
+        };
+        assert!(mp3_bytes <= 30_000, "mp3_bytes={mp3_bytes}");
+    }
+
+    // 5. PDF Ghostscript shrink.
+    if let (Some(magick), Some(_)) = (backends.image_tool(), backends.gs.as_deref()) {
+        let big_pdf = dir.path().join("brochure.pdf");
+        let st = Command::new(magick)
+            .args(["-size", "600x600", "plasma:fractal", "-compress", "none"])
+            .arg(&big_pdf)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let orig_pdf = fs::metadata(&big_pdf).unwrap().len();
+        let pdf_opts = ShrinkOptions {
+            goal: ShrinkGoal::SizePercent(35.0),
+            ..Default::default()
+        };
+        let ShrinkOutcome::Shrunk { final_bytes, .. } =
+            shrink_file(&big_pdf, &backends, &pdf_opts).unwrap()
+        else {
+            panic!("expected uncompressed PDF to shrink");
+        };
+        assert!(final_bytes < orig_pdf, "{final_bytes} vs {orig_pdf}");
+    }
 }

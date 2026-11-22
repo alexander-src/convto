@@ -23,7 +23,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            imagemagick librsvg2-bin ffmpeg poppler-utils p7zip-full zstd libarchive-tools
+            imagemagick librsvg2-bin ffmpeg poppler-utils ghostscript p7zip-full zstd libarchive-tools
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable

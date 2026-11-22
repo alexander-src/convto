@@ -13,23 +13,29 @@ use convto::desktop::{
 };
 use convto::detect::Backends;
 use convto::format::{detect_format, Format};
+use convto::gui::{has_gtk4_gui, launch_shrink_gui};
+use convto::shrink::{
+    format_bytes, parse_size_bytes, savings_percent, shrink_file, ShrinkGoal, ShrinkOptions,
+    ShrinkOutcome, VideoPreset,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn print_usage() {
     println!(
-        "convto {VERSION} - Linux right-click file converter and CLI\n\
+        "convto {VERSION} - Linux right-click file converter, shrinker, and CLI\n\
 \n\
 USAGE:\n\
   convto [OPTIONS] <target> <file>...\n\
   convto [OPTIONS] to <target> <file>...\n\
+  convto shrink [SHRINK OPTIONS] <file>...\n\
   convto targets <file>\n\
   convto formats\n\
   convto doctor\n\
   convto install [--desktop auto|dolphin|nautilus|nemo|thunar|all] [--all-menus] [--bin <path>]\n\
   convto uninstall [--desktop auto|dolphin|nautilus|nemo|thunar|all]\n\
 \n\
-OPTIONS:\n\
+CONVERT OPTIONS:\n\
   -n, --notify           Send a desktop notification via notify-send on completion\n\
   -f, --overwrite        Overwrite existing destination files instead of adding (1), (2)\n\
       --force            Re-encode even when input is already in the target format\n\
@@ -37,16 +43,30 @@ OPTIONS:\n\
   -q, --quality <1-100>  Quality preset for lossy image formats (jpg, webp, avif, jxl)\n\
   -j, --jobs <n>         Number of parallel worker threads\n\
       --delete-source    Delete source file after a successful conversion\n\
-      --dry-run          Show planned conversions without modifying files\n\
-  -h, --help             Print this help text\n\
-  -V, --version          Print version\n\
+      --dry-run          Show planned operations without modifying files\n\
+\n\
+SHRINK OPTIONS:\n\
+  -s, --target-size <sz> Fit under size at highest quality (e.g. 10MB, 500KB, 2.5MiB)\n\
+  -p, --percent <1-99>   Target percentage of original file size at highest quality\n\
+  -q, --quality <1-100>  Direct perceptual quality level (default: 82)\n\
+      --lossless         Lossless metadata strip + maximum lossless compression only\n\
+      --to <fmt>         Optionally change format while shrinking (e.g. webp, avif, mp4, opus)\n\
+      --hevc             Use H.265/HEVC (libx265) for MP4/MKV video shrinking\n\
+      --max-dim <px>     Cap longest image edge or video resolution (e.g. 1920, 1280)\n\
+      --preset <speed>   Video encoder speed: fast, medium, slow (default: medium)\n\
+      --no-two-pass      Use single-pass video bitrate encoding instead of two-pass\n\
+      --keep-metadata    Keep EXIF/GPS/media metadata (default strips metadata)\n\
+      --in-place         Atomically replace the original file instead of saving *-shrunk\n\
+      --gui              Open the interactive Shrink & Optimize dialog (GTK4 / kdialog / zenity)\n\
+      --json             Print newline-delimited JSON status records\n\
 \n\
 EXAMPLES:\n\
   convto png photo.webp\n\
-  convto webp *.png -q 85\n\
   convto mp3 video.mp4\n\
   convto yaml config.json\n\
-  convto tar.zst archive.zip\n\
+  convto shrink clip.mp4 --target-size 10MB\n\
+  convto shrink photo.png --percent 40 --to webp\n\
+  convto shrink --gui photo.png clip.mp4\n\
   convto install"
     );
 }
@@ -60,6 +80,10 @@ fn main() -> ExitCode {
 
     let mut notify = false;
     let mut opts = ConvertOptions::default();
+    let mut shrink_opts = ShrinkOptions::default();
+    let mut shrink_goal_set = false;
+    let mut launch_gui = false;
+    let mut json_output = false;
     let mut jobs: Option<usize> = None;
     let mut desktop = DesktopTarget::Auto;
     let mut all_menus = false;
@@ -79,11 +103,31 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "-n" | "--notify" => notify = true,
-            "-f" | "--overwrite" => opts.overwrite = true,
-            "--force" => opts.force_same = true,
+            "-f" | "--overwrite" => {
+                opts.overwrite = true;
+                shrink_opts.overwrite = true;
+            }
+            "--force" => {
+                opts.force_same = true;
+                shrink_opts.force = true;
+            }
             "--delete-source" => opts.delete_source = true,
-            "--dry-run" => opts.dry_run = true,
+            "--dry-run" => {
+                opts.dry_run = true;
+                shrink_opts.dry_run = true;
+            }
             "--all-menus" => all_menus = true,
+            "--lossless" => {
+                shrink_opts.goal = ShrinkGoal::Lossless;
+                shrink_goal_set = true;
+            }
+            "--hevc" => shrink_opts.video_hevc = true,
+            "--no-two-pass" => shrink_opts.two_pass = false,
+            "--keep-metadata" => shrink_opts.strip_metadata = false,
+            "--strip" => shrink_opts.strip_metadata = true,
+            "--in-place" => shrink_opts.in_place = true,
+            "--gui" => launch_gui = true,
+            "--json" => json_output = true,
             "-o" | "--out-dir" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
@@ -91,6 +135,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 };
                 opts.out_dir = Some(PathBuf::from(v));
+                shrink_opts.out_dir = Some(PathBuf::from(v));
             }
             "-q" | "--quality" => {
                 i += 1;
@@ -99,9 +144,90 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 };
                 match v.parse::<u8>() {
-                    Ok(q) if (1..=100).contains(&q) => opts.quality = Some(q),
+                    Ok(q) if (1..=100).contains(&q) => {
+                        opts.quality = Some(q);
+                        shrink_opts.goal = ShrinkGoal::Quality(q);
+                        shrink_goal_set = true;
+                    }
                     _ => {
                         eprintln!("error: invalid quality '{v}' (expected 1..=100)");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "-s" | "--target-size" | "--size" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("error: --target-size requires a size (e.g. 10MB, 500KB)");
+                    return ExitCode::from(2);
+                };
+                match parse_size_bytes(v) {
+                    Ok(bytes) => {
+                        shrink_opts.goal = ShrinkGoal::TargetBytes(bytes);
+                        shrink_goal_set = true;
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "-p" | "--percent" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("error: --percent requires a number 1..=99");
+                    return ExitCode::from(2);
+                };
+                let cleaned = v.trim().trim_end_matches('%');
+                match cleaned.parse::<f64>() {
+                    Ok(p) if (1.0..=99.0).contains(&p) => {
+                        shrink_opts.goal = ShrinkGoal::SizePercent(p);
+                        shrink_goal_set = true;
+                    }
+                    _ => {
+                        eprintln!("error: invalid percentage '{v}' (expected 1..=99)");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--to" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("error: --to requires a target format");
+                    return ExitCode::from(2);
+                };
+                match Format::parse(v) {
+                    Some(f) => shrink_opts.target_format = Some(f),
+                    None => {
+                        eprintln!("error: unknown target format '{v}'");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--max-dim" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("error: --max-dim requires a positive pixel value (e.g. 1920)");
+                    return ExitCode::from(2);
+                };
+                match v.parse::<u32>() {
+                    Ok(px) if px >= 32 => shrink_opts.max_dim = Some(px),
+                    _ => {
+                        eprintln!("error: invalid --max-dim '{v}' (expected >= 32)");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--preset" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("error: --preset requires fast, medium, or slow");
+                    return ExitCode::from(2);
+                };
+                match VideoPreset::parse(v) {
+                    Some(p) => shrink_opts.preset = p,
+                    None => {
+                        eprintln!("error: invalid --preset '{v}' (expected fast, medium, or slow)");
                         return ExitCode::from(2);
                     }
                 }
@@ -180,6 +306,31 @@ fn main() -> ExitCode {
         }
         "install" => cmd_install(desktop, all_menus, custom_bin, &backends),
         "uninstall" => cmd_uninstall(desktop, &backends),
+        "shrink" | "optimize" => {
+            let files = &positional[1..];
+            if files.is_empty() {
+                eprintln!("error: 'convto shrink' requires at least one file");
+                return ExitCode::from(2);
+            }
+            if launch_gui {
+                let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("convto"));
+                match launch_shrink_gui(&exe, files, notify, &backends) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        if notify {
+                            send_notification(&backends, "convto error", &e, true);
+                        }
+                        ExitCode::from(1)
+                    }
+                }
+            } else {
+                if !shrink_goal_set {
+                    shrink_opts.goal = ShrinkGoal::Quality(82);
+                }
+                cmd_shrink(files, &backends, &shrink_opts, jobs, notify, json_output)
+            }
+        }
         "to" => {
             if positional.len() < 3 {
                 eprintln!("error: 'convto to <target> <file>...' requires a target format and at least one file");
@@ -213,6 +364,9 @@ fn cmd_formats() {
         println!("  {:10} -> {}", group.slug, targets.join(", "));
     }
     println!("\nBuilt-in (zero external tools): json, yaml, toml, csv, tsv");
+    println!(
+        "Shrink / optimize: images, GIF, video (2-pass target size), audio, PDF (Ghostscript)"
+    );
 }
 
 fn cmd_targets(path: &Path) -> ExitCode {
@@ -240,7 +394,7 @@ fn cmd_doctor(backends: &Backends) {
         (
             "magick",
             backends.magick.as_deref(),
-            "images (PNG/JPG/WebP/AVIF/JXL/HEIC/GIF/ICO/TIFF/BMP/PDF)",
+            "images convert & binary-search shrink",
         ),
         (
             "convert",
@@ -255,7 +409,12 @@ fn cmd_doctor(backends: &Backends) {
         (
             "ffmpeg",
             backends.ffmpeg.as_deref(),
-            "audio, video, GIF -> MP4/WebM, video -> GIF/audio",
+            "audio, video, 2-pass target-size shrink, GIF",
+        ),
+        (
+            "ffprobe",
+            backends.ffprobe.as_deref(),
+            "media duration & resolution probing for target-size shrink",
         ),
         (
             "pdftoppm",
@@ -263,6 +422,12 @@ fn cmd_doctor(backends: &Backends) {
             "PDF -> PNG/JPG/WebP",
         ),
         ("pdftotext", backends.pdftotext.as_deref(), "PDF -> TXT"),
+        ("gs", backends.gs.as_deref(), "PDF shrinking (Ghostscript)"),
+        (
+            "pngquant",
+            backends.pngquant.as_deref(),
+            "optional perceptual PNG quantization",
+        ),
         (
             "tar",
             backends.tar.as_deref(),
@@ -298,6 +463,16 @@ fn cmd_doctor(backends: &Backends) {
         }
     }
     println!("  [builtin] {:14} json, yaml, toml, csv, tsv", "data");
+    let gui_status = if has_gtk4_gui(backends) {
+        "GTK4 interactive dialog (python3 + gi)"
+    } else if backends.kdialog.is_some() {
+        "kdialog fallback"
+    } else if backends.zenity.is_some() {
+        "zenity fallback"
+    } else {
+        "missing (install python-gobject + gtk4, kdialog, or zenity)"
+    };
+    println!("  [gui]     {:14} {gui_status}", "shrink-ui");
 
     if let Some(home) = home_dir() {
         println!("\nDesktop integrations:");
@@ -411,6 +586,182 @@ fn cmd_uninstall(desktop: DesktopTarget, backends: &Backends) -> ExitCode {
             eprintln!("error: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+fn cmd_shrink(
+    files: &[String],
+    backends: &Backends,
+    opts: &ShrinkOptions,
+    jobs: Option<usize>,
+    notify: bool,
+    json_output: bool,
+) -> ExitCode {
+    let start = Instant::now();
+    let paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+    let worker_count = jobs
+        .unwrap_or_else(|| {
+            thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+        })
+        .clamp(1, paths.len().max(1));
+
+    let results: Vec<Result<ShrinkOutcome, String>> = if worker_count == 1 || paths.len() == 1 {
+        paths
+            .iter()
+            .map(|p| shrink_file(p, backends, opts))
+            .collect()
+    } else {
+        let queue = Arc::new(Mutex::new((
+            0usize,
+            Vec::<(usize, Result<ShrinkOutcome, String>)>::new(),
+        )));
+        let paths_arc = Arc::new(paths);
+        let backends_arc = Arc::new(backends.clone());
+        let opts_arc = Arc::new(opts.clone());
+        let mut handles = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count {
+            let q = Arc::clone(&queue);
+            let ps = Arc::clone(&paths_arc);
+            let bs = Arc::clone(&backends_arc);
+            let os = Arc::clone(&opts_arc);
+            handles.push(thread::spawn(move || loop {
+                let next_idx = {
+                    let mut guard = q.lock().unwrap();
+                    if guard.0 >= ps.len() {
+                        break;
+                    }
+                    let idx = guard.0;
+                    guard.0 += 1;
+                    idx
+                };
+                let res = shrink_file(&ps[next_idx], &bs, &os);
+                q.lock().unwrap().1.push((next_idx, res));
+            }));
+        }
+        for h in handles {
+            let _ = h.join();
+        }
+        let mut collected = std::mem::take(&mut queue.lock().unwrap().1);
+        collected.sort_by_key(|(idx, _)| *idx);
+        collected.into_iter().map(|(_, r)| r).collect()
+    };
+
+    let mut shrunk_count = 0usize;
+    let mut optimal_count = 0usize;
+    let mut total_before = 0u64;
+    let mut total_after = 0u64;
+    let mut errors = Vec::new();
+    let mut last_single = None;
+
+    for res in results {
+        match res {
+            Ok(ShrinkOutcome::Shrunk {
+                source,
+                output,
+                original_bytes,
+                final_bytes,
+                detail,
+            }) => {
+                shrunk_count += 1;
+                total_before += original_bytes;
+                total_after += final_bytes;
+                let saved = savings_percent(original_bytes, final_bytes);
+                if json_output {
+                    println!(
+                        "{{\"status\":\"shrunk\",\"source\":{},\"output\":{},\"original_bytes\":{original_bytes},\"final_bytes\":{final_bytes},\"saved_percent\":{saved:.2},\"detail\":{}}}",
+                        json_quote(&source.display().to_string()),
+                        json_quote(&output.display().to_string()),
+                        json_quote(&detail)
+                    );
+                } else {
+                    println!(
+                        "{} -> {} ({} -> {}, -{:.1}%, {detail})",
+                        source.display(),
+                        output.display(),
+                        format_bytes(original_bytes),
+                        format_bytes(final_bytes),
+                        saved
+                    );
+                }
+                let out_name = output
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("output");
+                last_single = Some(format!(
+                    "{out_name}: {} -> {} (-{saved:.1}%)",
+                    format_bytes(original_bytes),
+                    format_bytes(final_bytes)
+                ));
+            }
+            Ok(ShrinkOutcome::AlreadyOptimal {
+                source,
+                original_bytes,
+                reason,
+            }) => {
+                optimal_count += 1;
+                if json_output {
+                    println!(
+                        "{{\"status\":\"optimal\",\"source\":{},\"original_bytes\":{original_bytes},\"reason\":{}}}",
+                        json_quote(&source.display().to_string()),
+                        json_quote(&reason)
+                    );
+                } else {
+                    println!("skipped {} ({reason})", source.display());
+                }
+            }
+            Ok(ShrinkOutcome::DryRun {
+                source,
+                destination,
+                original_bytes,
+                detail,
+            }) => {
+                println!(
+                    "[dry-run] {} ({}) -> {} ({detail})",
+                    source.display(),
+                    format_bytes(original_bytes),
+                    destination.display()
+                );
+            }
+            Err(e) => {
+                if json_output {
+                    println!("{{\"status\":\"error\",\"error\":{}}}", json_quote(&e));
+                } else {
+                    eprintln!("error: {e}");
+                }
+                errors.push(e);
+            }
+        }
+    }
+
+    if notify && !opts.dry_run {
+        let elapsed = start.elapsed().as_secs_f32();
+        if errors.is_empty() {
+            let body = if shrunk_count == 1 && optimal_count == 0 {
+                last_single.unwrap_or_else(|| format!("Shrunk 1 file ({elapsed:.1}s)"))
+            } else if shrunk_count == 0 && optimal_count > 0 {
+                format!("{optimal_count} file(s) already optimal")
+            } else {
+                let saved = savings_percent(total_before, total_after);
+                format!(
+                    "Shrunk {shrunk_count} file(s): {} -> {} (-{saved:.1}%, {elapsed:.1}s)",
+                    format_bytes(total_before),
+                    format_bytes(total_after)
+                )
+            };
+            send_notification(backends, "convto shrink", &body, false);
+        } else {
+            let body = format!("Shrink failed: {}", errors[0]);
+            send_notification(backends, "convto error", &body, true);
+        }
+    }
+
+    if errors.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 
@@ -582,6 +933,24 @@ fn cmd_convert(
     } else {
         ExitCode::from(1)
     }
+}
+
+fn json_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn send_notification(backends: &Backends, title: &str, body: &str, critical: bool) {

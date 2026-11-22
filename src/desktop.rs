@@ -523,6 +523,13 @@ pub fn action_enabled(
     }
 }
 
+pub fn group_supports_shrink(family: Family) -> bool {
+    matches!(
+        family,
+        Family::Image | Family::Gif | Family::Audio | Family::Video | Family::Pdf
+    )
+}
+
 pub fn render_dolphin_desktop(
     group: &MenuGroup,
     bin_path: &Path,
@@ -539,7 +546,13 @@ pub fn render_dolphin_desktop(
     }
     let bin = bin_path.display();
     let mime_list = group.mime_types.join(";") + ";";
-    let action_ids: Vec<&str> = active_actions.iter().map(|a| a.id).collect();
+    let include_shrink = group_supports_shrink(group.family);
+    let mut action_ids: Vec<&str> = Vec::with_capacity(active_actions.len() + 1);
+    if include_shrink {
+        action_ids.push("shrink");
+    }
+    action_ids.extend(active_actions.iter().map(|a| a.id));
+
     let mut out = String::new();
     out.push_str("[Desktop Entry]\n");
     out.push_str("Type=Service\n");
@@ -552,6 +565,13 @@ pub fn render_dolphin_desktop(
     out.push_str("Icon=document-export\n");
     out.push_str(&format!("Actions={};\n", action_ids.join(";")));
     out.push_str("X-Convto-Generated=true\n");
+
+    if include_shrink {
+        out.push_str("\n[Desktop Action shrink]\n");
+        out.push_str("Name=Shrink / Optimize...\n");
+        out.push_str("Icon=archive-insert\n");
+        out.push_str(&format!("Exec=\"{bin}\" shrink --gui --notify %F\n"));
+    }
 
     for action in active_actions {
         out.push_str(&format!("\n[Desktop Action {}]\n", action.id));
@@ -644,6 +664,10 @@ class ConvtoMenuProvider(GObject.GObject, Nautilus.MenuProvider):
         top = Nautilus.MenuItem(name=f"Convto::{{group_name}}", label="Convert to")
         submenu = Nautilus.Menu()
         top.set_submenu(submenu)
+        if group_name in ("image", "gif", "audio", "video", "pdf"):
+            shrink_item = Nautilus.MenuItem(name=f"Convto::{{group_name}}::shrink", label="Shrink / Optimize...")
+            shrink_item.connect("activate", self._run_shrink, paths)
+            submenu.append_item(shrink_item)
         for fmt, label in targets:
             if single_ext == fmt:
                 continue
@@ -654,6 +678,9 @@ class ConvtoMenuProvider(GObject.GObject, Nautilus.MenuProvider):
 
     def _run(self, _menu, fmt, paths):
         subprocess.Popen([CONVTO_BIN, "--notify", "to", fmt, *paths])
+
+    def _run_shrink(self, _menu, paths):
+        subprocess.Popen([CONVTO_BIN, "shrink", "--gui", "--notify", *paths])
 "#
     )
 }
@@ -781,6 +808,19 @@ pub fn install_menus(
                     .map_err(|e| format!("Failed to create {}: {e}", dir.display()))?;
                 remove_prefixed_files(&dir, "convto-", ".nemo_action")?;
                 for group in MENU_GROUPS {
+                    if group_supports_shrink(group.family)
+                        && group_enabled(group, backends, all_menus)
+                    {
+                        let mimes = group.mime_types.join(";") + ";";
+                        let shrink_action = format!(
+                            "[Nemo Action]\nName=Shrink / Optimize...\nComment=Reduce file size while preserving quality using convto\nExec=\"{}\" shrink --gui --notify %F\nIcon-Name=archive-insert\nSelection=notnone\nMimetypes={mimes}\nQuote=double\n",
+                            bin_path.display()
+                        );
+                        let path = dir.join(format!("convto-{}-shrink.nemo_action", group.slug));
+                        fs::write(&path, shrink_action)
+                            .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+                        installed_files.push(path);
+                    }
                     for action in group.actions {
                         if action_enabled(group, action, backends, all_menus) {
                             let path = dir
@@ -931,6 +971,12 @@ fn update_thunar_uca(
     let bin = xml_escape(&bin_path.display().to_string());
     for group in MENU_GROUPS {
         let patterns = thunar_patterns_for(group.family);
+        if group_supports_shrink(group.family) && group_enabled(group, backends, all_menus) {
+            block.push_str(&format!(
+                "<action>\n  <icon>archive-insert</icon>\n  <name>Shrink / Optimize...</name>\n  <submenu>Convert to</submenu>\n  <unique-id>convto-{}-shrink</unique-id>\n  <command>&quot;{bin}&quot; shrink --gui --notify %F</command>\n  <description>Reduce file size while preserving quality</description>\n  <patterns>{patterns}</patterns>\n  <other-files/>\n  <image-files/>\n  <audio-files/>\n  <video-files/>\n  <text-files/>\n</action>\n",
+                group.slug,
+            ));
+        }
         for action in group.actions {
             if !action_enabled(group, action, backends, all_menus) {
                 continue;

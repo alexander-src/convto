@@ -6,9 +6,13 @@ pub struct Backends {
     pub magick: Option<PathBuf>,
     pub convert: Option<PathBuf>,
     pub ffmpeg: Option<PathBuf>,
+    pub ffprobe: Option<PathBuf>,
     pub rsvg_convert: Option<PathBuf>,
     pub pdftoppm: Option<PathBuf>,
     pub pdftotext: Option<PathBuf>,
+    pub gs: Option<PathBuf>,
+    pub pngquant: Option<PathBuf>,
+    pub jpegoptim: Option<PathBuf>,
     pub tar: Option<PathBuf>,
     pub bsdtar: Option<PathBuf>,
     pub seven_z: Option<PathBuf>,
@@ -24,6 +28,9 @@ pub struct Backends {
     pub notify_send: Option<PathBuf>,
     pub kbuildsycoca6: Option<PathBuf>,
     pub kbuildsycoca5: Option<PathBuf>,
+    pub python3: Option<PathBuf>,
+    pub kdialog: Option<PathBuf>,
+    pub zenity: Option<PathBuf>,
 }
 
 impl Backends {
@@ -32,9 +39,13 @@ impl Backends {
             magick: find_in_path("magick"),
             convert: find_in_path("convert"),
             ffmpeg: find_in_path("ffmpeg"),
+            ffprobe: find_in_path("ffprobe"),
             rsvg_convert: find_in_path("rsvg-convert"),
             pdftoppm: find_in_path("pdftoppm"),
             pdftotext: find_in_path("pdftotext"),
+            gs: find_in_path("gs"),
+            pngquant: find_in_path("pngquant"),
+            jpegoptim: find_in_path("jpegoptim"),
             tar: find_in_path("tar"),
             bsdtar: find_in_path("bsdtar"),
             seven_z: find_in_path("7z").or_else(|| find_in_path("7zz")),
@@ -50,6 +61,9 @@ impl Backends {
             notify_send: find_in_path("notify-send"),
             kbuildsycoca6: find_in_path("kbuildsycoca6"),
             kbuildsycoca5: find_in_path("kbuildsycoca5"),
+            python3: find_in_path("python3"),
+            kdialog: find_in_path("kdialog"),
+            zenity: find_in_path("zenity"),
         }
     }
 
@@ -66,7 +80,10 @@ impl Backends {
     }
 
     pub fn has_pdf(&self) -> bool {
-        self.pdftoppm.is_some() || self.pdftotext.is_some() || self.image_tool().is_some()
+        self.pdftoppm.is_some()
+            || self.pdftotext.is_some()
+            || self.gs.is_some()
+            || self.image_tool().is_some()
     }
 
     pub fn has_archives(&self) -> bool {
