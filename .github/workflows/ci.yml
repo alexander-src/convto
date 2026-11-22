@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    name: Build, lint, and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install conversion backends (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            imagemagick librsvg2-bin ffmpeg poppler-utils p7zip-full zstd libarchive-tools
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy with warnings as errors
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run unit and live backend integration tests
+        run: cargo test --all-targets
+
+      - name: Build release binary and run smoke check
+        run: |
+          cargo build --release
+          ./target/release/convto doctor
+          ./target/release/convto formats

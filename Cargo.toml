@@ -1,0 +1,16 @@
+[package]
+name = "convto"
+version = "0.1.0"
+edition = "2021"
+description = "Linux file-manager context menu and CLI file converter across images, audio, video, PDF, structured data, archives, and documents"
+license = "MIT"
+repository = "https://github.com/alexander-src/convto"
+keywords = ["linux", "converter", "dolphin", "nautilus", "cli"]
+categories = ["command-line-utilities", "multimedia"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
