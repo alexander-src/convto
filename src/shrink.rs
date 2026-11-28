@@ -1009,7 +1009,7 @@ fn shrink_video(
             if !is_webm {
                 p1.args(["-preset", opts.preset.as_str(), "-pix_fmt", "yuv420p"]);
             } else {
-                p1.args(["-b:v", &format!("{video_kbps}k"), "-pix_fmt", "yuv420p"]);
+                p1.args(["-pix_fmt", "yuv420p"]);
             }
             p1.args(["-pass", "1", "-passlogfile"])
                 .arg(&passlog)

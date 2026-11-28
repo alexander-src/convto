@@ -1,6 +1,6 @@
 [package]
 name = "convto"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Linux file-manager context menu and CLI file converter across images, audio, video, PDF, structured data, archives, and documents"
 license = "MIT"
