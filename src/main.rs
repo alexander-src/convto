@@ -44,6 +44,7 @@ CONVERT OPTIONS:\n\
   -j, --jobs <n>         Number of parallel worker threads\n\
       --delete-source    Delete source file after a successful conversion\n\
       --dry-run          Show planned operations without modifying files\n\
+      --json             Print machine-readable JSON output (convert, shrink, targets, formats, doctor)\n\
 \n\
 SHRINK OPTIONS:\n\
   -s, --target-size <sz> Fit under size at highest quality (e.g. 10MB, 500KB, 2.5MiB)\n\
@@ -290,11 +291,11 @@ fn main() -> ExitCode {
 
     match positional[0].as_str() {
         "formats" => {
-            cmd_formats();
+            cmd_formats(json_output);
             ExitCode::SUCCESS
         }
         "doctor" => {
-            cmd_doctor(&backends);
+            cmd_doctor(&backends, json_output);
             ExitCode::SUCCESS
         }
         "targets" => {
@@ -302,7 +303,7 @@ fn main() -> ExitCode {
                 eprintln!("error: 'convto targets' requires a file path");
                 return ExitCode::from(2);
             };
-            cmd_targets(Path::new(path))
+            cmd_targets(Path::new(path), json_output)
         }
         "install" => cmd_install(desktop, all_menus, custom_bin, &backends),
         "uninstall" => cmd_uninstall(desktop, &backends),
@@ -343,6 +344,7 @@ fn main() -> ExitCode {
                 &opts,
                 jobs,
                 notify,
+                json_output,
             )
         }
         first => {
@@ -352,12 +354,42 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::from(2);
             }
-            cmd_convert(first, &positional[1..], &backends, &opts, jobs, notify)
+            cmd_convert(
+                first,
+                &positional[1..],
+                &backends,
+                &opts,
+                jobs,
+                notify,
+                json_output,
+            )
         }
     }
 }
 
-fn cmd_formats() {
+fn cmd_formats(json_output: bool) {
+    if json_output {
+        let groups: Vec<String> = MENU_GROUPS
+            .iter()
+            .map(|group| {
+                let targets: Vec<String> = group
+                    .actions
+                    .iter()
+                    .map(|a| json_quote(a.target.ext()))
+                    .collect();
+                format!(
+                    "{{\"family\":{},\"targets\":[{}]}}",
+                    json_quote(group.slug),
+                    targets.join(",")
+                )
+            })
+            .collect();
+        println!(
+            "{{\"groups\":[{}],\"builtin\":[\"json\",\"yaml\",\"toml\",\"csv\",\"tsv\"]}}",
+            groups.join(",")
+        );
+        return;
+    }
     println!("Supported format families and targets:\n");
     for group in MENU_GROUPS {
         let targets: Vec<&str> = group.actions.iter().map(|a| a.target.ext()).collect();
@@ -369,9 +401,18 @@ fn cmd_formats() {
     );
 }
 
-fn cmd_targets(path: &Path) -> ExitCode {
+fn cmd_targets(path: &Path, json_output: bool) -> ExitCode {
     let Some(fmt) = detect_format(path) else {
-        eprintln!("error: unrecognized format for {}", path.display());
+        let msg = format!("unrecognized format for {}", path.display());
+        if json_output {
+            println!(
+                "{{\"status\":\"error\",\"file\":{},\"error\":{}}}",
+                json_quote(&path.display().to_string()),
+                json_quote(&msg)
+            );
+        } else {
+            eprintln!("error: {msg}");
+        }
         return ExitCode::from(1);
     };
     let targets: Vec<&str> = fmt
@@ -381,15 +422,24 @@ fn cmd_targets(path: &Path) -> ExitCode {
         .filter(|&t| t != fmt)
         .map(Format::ext)
         .collect();
-    println!("file:    {}", path.display());
-    println!("format:  {fmt} ({})", fmt.family());
-    println!("targets: {}", targets.join(", "));
+    if json_output {
+        let quoted: Vec<String> = targets.iter().map(|t| json_quote(t)).collect();
+        println!(
+            "{{\"file\":{},\"format\":{},\"family\":{},\"targets\":[{}]}}",
+            json_quote(&path.display().to_string()),
+            json_quote(fmt.ext()),
+            json_quote(&fmt.family().to_string()),
+            quoted.join(",")
+        );
+    } else {
+        println!("file:    {}", path.display());
+        println!("format:  {fmt} ({})", fmt.family());
+        println!("targets: {}", targets.join(", "));
+    }
     ExitCode::SUCCESS
 }
 
-fn cmd_doctor(backends: &Backends) {
-    println!("convto {VERSION} environment check\n");
-    println!("Backends:");
+fn cmd_doctor(backends: &Backends, json_output: bool) {
     let checks: &[(&str, Option<&Path>, &str)] = &[
         (
             "magick",
@@ -456,13 +506,6 @@ fn cmd_doctor(backends: &Backends) {
             "desktop notifications",
         ),
     ];
-    for (name, path, desc) in checks {
-        match path {
-            Some(p) => println!("  [ok]      {:14} {} ({desc})", name, p.display()),
-            None => println!("  [missing] {:14} ({desc})", name),
-        }
-    }
-    println!("  [builtin] {:14} json, yaml, toml, csv, tsv", "data");
     let gui_status = if has_gtk4_gui(backends) {
         "GTK4 interactive dialog (python3 + gi)"
     } else if backends.kdialog.is_some() {
@@ -472,6 +515,40 @@ fn cmd_doctor(backends: &Backends) {
     } else {
         "missing (install python-gobject + gtk4, kdialog, or zenity)"
     };
+
+    if json_output {
+        let items: Vec<String> = checks
+            .iter()
+            .map(|(name, path, desc)| {
+                let path_json = path
+                    .map(|p| json_quote(&p.display().to_string()))
+                    .unwrap_or_else(|| "null".to_string());
+                format!(
+                    "{{\"name\":{},\"available\":{},\"path\":{path_json},\"description\":{}}}",
+                    json_quote(name),
+                    path.is_some(),
+                    json_quote(desc)
+                )
+            })
+            .collect();
+        println!(
+            "{{\"version\":{},\"backends\":[{}],\"builtin\":[\"json\",\"yaml\",\"toml\",\"csv\",\"tsv\"],\"gui\":{}}}",
+            json_quote(VERSION),
+            items.join(","),
+            json_quote(gui_status)
+        );
+        return;
+    }
+
+    println!("convto {VERSION} environment check\n");
+    println!("Backends:");
+    for (name, path, desc) in checks {
+        match path {
+            Some(p) => println!("  [ok]      {:14} {} ({desc})", name, p.display()),
+            None => println!("  [missing] {:14} ({desc})", name),
+        }
+    }
+    println!("  [builtin] {:14} json, yaml, toml, csv, tsv", "data");
     println!("  [gui]     {:14} {gui_status}", "shrink-ui");
 
     if let Some(home) = home_dir() {
@@ -718,12 +795,21 @@ fn cmd_shrink(
                 original_bytes,
                 detail,
             }) => {
-                println!(
-                    "[dry-run] {} ({}) -> {} ({detail})",
-                    source.display(),
-                    format_bytes(original_bytes),
-                    destination.display()
-                );
+                if json_output {
+                    println!(
+                        "{{\"status\":\"dry_run\",\"source\":{},\"destination\":{},\"original_bytes\":{original_bytes},\"detail\":{}}}",
+                        json_quote(&source.display().to_string()),
+                        json_quote(&destination.display().to_string()),
+                        json_quote(&detail)
+                    );
+                } else {
+                    println!(
+                        "[dry-run] {} ({}) -> {} ({detail})",
+                        source.display(),
+                        format_bytes(original_bytes),
+                        destination.display()
+                    );
+                }
             }
             Err(e) => {
                 if json_output {
@@ -772,10 +858,15 @@ fn cmd_convert(
     opts: &ConvertOptions,
     jobs: Option<usize>,
     notify: bool,
+    json_output: bool,
 ) -> ExitCode {
     let Some(target) = Format::parse(target_str) else {
         let msg = format!("Unknown target format '{target_str}' (run 'convto formats')");
-        eprintln!("error: {msg}");
+        if json_output {
+            println!("{{\"status\":\"error\",\"error\":{}}}", json_quote(&msg));
+        } else {
+            eprintln!("error: {msg}");
+        }
         if notify {
             send_notification(backends, "convto error", &msg, true);
         }
@@ -848,6 +939,19 @@ fn cmd_convert(
                 ..
             }) => {
                 converted_count += 1;
+                if json_output {
+                    let outs: Vec<String> = outputs
+                        .iter()
+                        .map(|p| json_quote(&p.display().to_string()))
+                        .collect();
+                    println!(
+                        "{{\"status\":\"converted\",\"source\":{},\"target\":{},\"outputs\":[{}],\"backend\":{}}}",
+                        json_quote(&source.display().to_string()),
+                        json_quote(target.ext()),
+                        outs.join(","),
+                        json_quote(&backend)
+                    );
+                }
                 if outputs.len() == 1 {
                     let out_name = outputs[0]
                         .file_name()
@@ -857,18 +961,22 @@ fn cmd_convert(
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("input");
-                    println!(
-                        "{} -> {} ({backend})",
-                        source.display(),
-                        outputs[0].display()
-                    );
+                    if !json_output {
+                        println!(
+                            "{} -> {} ({backend})",
+                            source.display(),
+                            outputs[0].display()
+                        );
+                    }
                     last_single_summary = Some(format!("{src_name} -> {out_name}"));
                 } else {
-                    println!(
-                        "{} -> {} files ({backend})",
-                        source.display(),
-                        outputs.len()
-                    );
+                    if !json_output {
+                        println!(
+                            "{} -> {} files ({backend})",
+                            source.display(),
+                            outputs.len()
+                        );
+                    }
                     last_single_summary = Some(format!("{} files created", outputs.len()));
                 }
             }
@@ -878,18 +986,41 @@ fn cmd_convert(
                 destination,
                 backend,
             }) => {
-                println!(
-                    "[dry-run] {} ({source_format}) -> {} ({backend})",
-                    source.display(),
-                    destination.display()
-                );
+                if json_output {
+                    println!(
+                        "{{\"status\":\"dry_run\",\"source\":{},\"source_format\":{},\"target\":{},\"destination\":{},\"backend\":{}}}",
+                        json_quote(&source.display().to_string()),
+                        json_quote(source_format.ext()),
+                        json_quote(target.ext()),
+                        json_quote(&destination.display().to_string()),
+                        json_quote(&backend)
+                    );
+                } else {
+                    println!(
+                        "[dry-run] {} ({source_format}) -> {} ({backend})",
+                        source.display(),
+                        destination.display()
+                    );
+                }
             }
             Ok(Outcome::Skipped { source, reason }) => {
                 skipped_count += 1;
-                println!("skipped {} ({reason})", source.display());
+                if json_output {
+                    println!(
+                        "{{\"status\":\"skipped\",\"source\":{},\"reason\":{}}}",
+                        json_quote(&source.display().to_string()),
+                        json_quote(&reason)
+                    );
+                } else {
+                    println!("skipped {} ({reason})", source.display());
+                }
             }
             Err(e) => {
-                eprintln!("error: {e}");
+                if json_output {
+                    println!("{{\"status\":\"error\",\"error\":{}}}", json_quote(&e));
+                } else {
+                    eprintln!("error: {e}");
+                }
                 errors.push(e);
             }
         }
