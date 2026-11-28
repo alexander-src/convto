@@ -631,3 +631,77 @@ fn live_shrink_images_video_audio_and_pdf() {
         assert!(final_bytes < orig_pdf, "{final_bytes} vs {orig_pdf}");
     }
 }
+
+#[test]
+fn cli_json_output_across_convert_targets_formats_and_doctor() {
+    let dir = TempWorkDir::new("cli_json");
+    let src = dir.path().join("config.json");
+    fs::write(&src, "{\"name\":\"convto\",\"count\":3}\n").unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_convto");
+
+    // 1. doctor --json
+    let doctor = Command::new(bin)
+        .args(["--json", "doctor"])
+        .output()
+        .unwrap();
+    assert!(doctor.status.success());
+    let doctor_out = String::from_utf8(doctor.stdout).unwrap();
+    assert!(doctor_out.trim().starts_with('{'));
+    assert!(doctor_out.contains("\"backends\":["));
+    assert!(doctor_out.contains("\"builtin\":[\"json\",\"yaml\",\"toml\",\"csv\",\"tsv\"]"));
+
+    // 2. formats --json
+    let formats = Command::new(bin)
+        .args(["--json", "formats"])
+        .output()
+        .unwrap();
+    assert!(formats.status.success());
+    let formats_out = String::from_utf8(formats.stdout).unwrap();
+    assert!(formats_out.contains("\"groups\":["));
+    assert!(formats_out.contains("\"family\":\"image\""));
+
+    // 3. targets --json
+    let targets = Command::new(bin)
+        .args(["--json", "targets"])
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(targets.status.success());
+    let targets_out = String::from_utf8(targets.stdout).unwrap();
+    assert!(targets_out.contains("\"format\":\"json\""));
+    assert!(targets_out.contains("\"yaml\""));
+
+    // 4. convert --dry-run --json
+    let dry = Command::new(bin)
+        .args(["--json", "--dry-run", "yaml"])
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(dry.status.success());
+    let dry_out = String::from_utf8(dry.stdout).unwrap();
+    assert!(dry_out.contains("\"status\":\"dry_run\""));
+    assert!(dry_out.contains("\"target\":\"yaml\""));
+
+    // 5. convert --json (actual built-in json -> yaml)
+    let conv = Command::new(bin)
+        .args(["--json", "yaml"])
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(conv.status.success());
+    let conv_out = String::from_utf8(conv.stdout).unwrap();
+    assert!(conv_out.contains("\"status\":\"converted\""));
+    assert!(conv_out.contains("\"backend\":\"builtin\""));
+    assert!(dir.path().join("config.yaml").exists());
+
+    // 6. skipped same-format --json
+    let skip = Command::new(bin)
+        .args(["--json", "json"])
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(skip.status.success());
+    let skip_out = String::from_utf8(skip.stdout).unwrap();
+    assert!(skip_out.contains("\"status\":\"skipped\""));
+}

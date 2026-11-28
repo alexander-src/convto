@@ -90,9 +90,11 @@ convto targets photo.webp
 convto doctor
 ```
 
-Useful convert flags: `--out-dir <dir>`, `--overwrite`, `--force` (re-encode same format), `--delete-source`, `--quality <1-100>`, `--jobs <n>`, `--dry-run`, `--notify`.
+Useful convert flags: `--out-dir <dir>`, `--overwrite`, `--force` (re-encode same format), `--delete-source`, `--quality <1-100>`, `--jobs <n>`, `--dry-run`, `--notify`, `--json`.
 
 Useful shrink flags: `--target-size <size>`, `--percent <1-99>`, `--quality <1-100>`, `--lossless`, `--to <fmt>`, `--hevc`, `--max-dim <px>`, `--preset fast|medium|slow`, `--no-two-pass`, `--keep-metadata`, `--in-place`, `--gui`, `--json`.
+
+`--json` works across convert, shrink, `targets`, `formats`, and `doctor` for scripting.
 
 ## Limitations
 
