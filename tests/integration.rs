@@ -705,3 +705,58 @@ fn cli_json_output_across_convert_targets_formats_and_doctor() {
     let skip_out = String::from_utf8(skip.stdout).unwrap();
     assert!(skip_out.contains("\"status\":\"skipped\""));
 }
+
+#[test]
+fn live_odd_dimension_video_converts_to_mp4_mkv_and_mov() {
+    let backends = Backends::probe();
+    let Some(ffmpeg) = backends.ffmpeg.as_deref() else {
+        return;
+    };
+    let dir = TempWorkDir::new("odd_video");
+    let odd_src = dir.path().join("screen_161x121.mkv");
+    // Use yuv444p in MKV so ffmpeg produces a real odd-dimension video (161x121).
+    let st = Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=0.4:size=161x121:rate=10",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv444p",
+        ])
+        .arg(&odd_src)
+        .status()
+        .unwrap();
+    assert!(st.success(), "failed to generate odd-dimension test video");
+
+    let opts = ConvertOptions::default();
+    for target in [Format::Mp4, Format::Mov] {
+        let out = convert_file(&odd_src, target, &backends, &opts)
+            .unwrap_or_else(|e| panic!("odd-dimension convert to {target} failed: {e}"));
+        let Outcome::Converted { outputs, .. } = out else {
+            panic!("expected Converted for {target}");
+        };
+        assert_eq!(outputs.len(), 1);
+        assert!(outputs[0].exists());
+    }
+
+    // Also test MP4 -> MKV with odd dimensions via force-conversion from a WebM source.
+    let odd_mp4 = dir.path().join("screen_161x121.mp4");
+    assert!(odd_mp4.exists());
+    let mkv_opts = ConvertOptions {
+        force_same: true,
+        ..Default::default()
+    };
+    let out = convert_file(&odd_src, Format::Mkv, &backends, &mkv_opts)
+        .expect("odd-dimension convert to mkv failed");
+    let Outcome::Converted { outputs, .. } = out else {
+        panic!("expected Converted for mkv");
+    };
+    assert!(outputs[0].exists());
+}

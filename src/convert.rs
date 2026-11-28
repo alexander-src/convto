@@ -484,6 +484,8 @@ fn convert_media_file(
                 ]);
             } else {
                 cmd.args([
+                    "-vf",
+                    "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                     "-c:v",
                     "libx264",
                     "-pix_fmt",
@@ -503,12 +505,26 @@ fn convert_media_file(
         }
         Format::Mkv => {
             cmd.args([
-                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "22", "-preset", "medium",
-                "-c:a", "aac", "-b:a", "192k",
+                "-vf",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-crf",
+                "22",
+                "-preset",
+                "medium",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
             ]);
         }
         Format::Mov => {
             cmd.args([
+                "-vf",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                 "-c:v",
                 "libx264",
                 "-pix_fmt",
@@ -528,6 +544,8 @@ fn convert_media_file(
         Format::Webm => {
             if src_fmt == Format::Gif {
                 cmd.args([
+                    "-vf",
+                    "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                     "-c:v",
                     "libvpx-vp9",
                     "-crf",
@@ -539,12 +557,16 @@ fn convert_media_file(
                 ]);
             } else {
                 cmd.args([
+                    "-vf",
+                    "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                     "-c:v",
                     "libvpx-vp9",
                     "-crf",
                     "30",
                     "-b:v",
                     "0",
+                    "-pix_fmt",
+                    "yuv420p",
                     "-c:a",
                     "libopus",
                     "-b:a",
